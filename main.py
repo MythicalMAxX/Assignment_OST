@@ -1,69 +1,90 @@
-# Importing necessary libraries
 import os
-import pdfplumber
-import docx
 import re
+import subprocess
+import pdfplumber
+import textract
 import pandas as pd
+from bs4 import BeautifulSoup
+from docx import Document
+from docx2pdf import convert
 
-# Function to extract information from a PDF file
-def Extract_Info_From_Pdf(File_Path):
-    # Open the PDF file
-    with pdfplumber.open(File_Path) as Pdf:
-        Text = ''
-        # Loop through each page in the PDF
-        for Page in Pdf.pages:
-            # Extract the text from the page and add it to the Text variable
-            Text += Page.extract_text()
+def read_text_from_pdf(file_path):
+    with pdfplumber.open(file_path) as pdf:
+        text = ''
+        for page in pdf.pages:
+            text += page.extract_text()
+    return text
 
-        # Use regular expressions to find the email and phone number in the text
-        Email = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', Text)
-        Phone = re.search(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', Text)
+def read_text_from_docx(file_path):
+    doc = Document(file_path)
+    text = ''
+    for paragraph in doc.paragraphs:
+        text += paragraph.text + '\n'
+    return text
 
-        # Return a dictionary with the extracted email, phone number, and text
-        return {
-            'email': Email.group() if Email else None,
-            'phone': Phone.group() if Phone else None,
-            'text': Text
-        }
+def convert_to_pdf(input_file_path, output_file_path):
+    subprocess.run(['libreoffice', '--headless', '--convert-to', 'pdf', input_file_path, '--outdir', os.path.dirname(output_file_path)])
 
-# Function to extract information from a Word file
-def Extract_Info_From_Docx(File_Path):
-    # Open the Word file
-    Doc = docx.Document(File_Path)
-    # Extract the text from the document
-    Text = ' '.join([Paragraph.text for Paragraph in Doc.paragraphs])
+def convert_doc_to_docx(input_file_path, output_file_path):
+    with open(input_file_path, 'rb') as f:
+        html_content = f.read()
+        soup = BeautifulSoup(html_content, 'lxml')
+        text = soup.get_text()
+    doc = Document()
+    doc.add_paragraph(text)
+    doc.save(output_file_path)
 
-    # Use regular expressions to find the email and phone number in the text
-    Email = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', Text)
-    Phone = re.search(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', Text)
+def extract_email(text):
+    text = text.decode('utf-8') if isinstance(text, bytes) else text
+    email = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
+    return email[0] if email else None
 
-    # Return a dictionary with the extracted email, phone number, and text
-    return {
-        'email': Email.group() if Email else None,
-        'phone': Phone.group() if Phone else None,
-        'text': Text
-    }
+def extract_phone(text):
+    text = text.decode('utf-8') if isinstance(text, bytes) else text
+    phone = re.findall(r'\+?\d{1,4}?\s?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', text)
+    return phone[0] if phone else None
 
-# Function to write the extracted information to an Excel file
-def Write_To_Excel(Data, Output_Path):
-    # Convert the data to a pandas DataFrame
-    Df = pd.DataFrame(Data)
-    # Write the DataFrame to an Excel file
-    Df.to_excel(Output_Path, index=False)
+def clean_text(text):
+    text = text.decode('utf-8') if isinstance(text, bytes) else text
+    text = re.sub('\s+', ' ', text)
+    text = re.sub('\n+', '\n', text)
+    return text.strip()
 
-# Path to the folder containing the CVs
-Folder_Path = 'CV/Sample2/'
+def process_files(folder_path):
+    data = []
+    for filename in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, filename)
+        file_name, file_extension = os.path.splitext(filename)
+        if file_extension.lower() == '.pdf':
+            text = read_text_from_pdf(file_path)
+        elif file_extension.lower() == '.docx':
+            text = read_text_from_docx(file_path)
+        elif file_extension.lower() == '.doc':
+            docx_path = os.path.join(folder_path, f"{file_name}.docx")
+            convert_doc_to_docx(file_path, docx_path)
+            convert(docx_path, os.path.join(folder_path, f"{file_name}.pdf"))
+            text = read_text_from_pdf(os.path.join(folder_path, f"{file_name}.pdf"))
+            if len(text) < 10:
+                text = textract.process(os.path.join(folder_path, f"{file_name}.doc"))
+                print(text)
+            os.remove(docx_path)
+            os.remove(os.path.join(folder_path, f"{file_name}.pdf"))
+        else:
+            print(f"Unsupported file type: {filename}")
+            continue
+        email = extract_email(text)
+        phone = extract_phone(text)
+        text = clean_text(text)
+        data.append([filename, email, phone, text])
+        print(f"Text from {filename}:")
+        print(text)
+    return data
 
-# Initialize an empty list to store the extracted information
-Data = []
-# Loop through each file in the folder
-for File_Name in os.listdir(Folder_Path):
-    # If the file is a PDF, use the PDF extraction function
-    if File_Name.endswith('.pdf'):
-        Data.append(Extract_Info_From_Pdf(os.path.join(Folder_Path, File_Name)))
-    # If the file is a Word document, use the Word extraction function
-    elif File_Name.endswith('.docx'):
-        Data.append(Extract_Info_From_Docx(os.path.join(Folder_Path, File_Name)))
+def write_to_excel(data, output_file):
+    df = pd.DataFrame(data, columns=['Filename', 'Email', 'Phone', 'Text'])
+    df.to_excel(output_file, index=False)
 
-# Write the extracted information to an Excel file
-Write_To_Excel(Data, 'output.xlsx')
+folder_path = "CV/Sample2/"
+output_file = "output.xlsx"
+data = process_files(folder_path)
+write_to_excel(data, output_file)
